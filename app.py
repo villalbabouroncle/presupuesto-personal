@@ -46,7 +46,7 @@ def describir_error(e: Exception) -> str:
     return texto
 
 
-VERSION_APP = "2026-10-23d"
+VERSION_APP = "2026-10-23e"
 print(f"[presupuesto] versión {VERSION_APP} | SHEET_ID {'sí' if os.environ.get('SHEET_ID') else 'NO'} | "
       f"GOOGLE_CREDENTIALS {'sí' if os.environ.get('GOOGLE_CREDENTIALS') else 'NO'} | "
       f"APP_PASSWORD {'sí' if CLAVE_APP else 'NO'}", flush=True)
@@ -735,11 +735,19 @@ def server(input, output, session):
             return None
         m = pd.Timestamp(input.r_periodo() + "-01")
         actual = ingreso_actual(input.r_concepto(), m)
-        monto = input.r_monto() or 0
-        nuevo = actual + monto if input.r_modo() == "sumar" else monto
+        monto = input.r_monto()
+        reemplazar = input.r_modo() == "reemplazar"
+        if monto is None:
+            nota = "Para borrarlo, elige «Reemplazar» y pon 0." if reemplazar and actual else None
+        elif reemplazar and monto == 0:
+            nota = ui.span("Se borrará el monto de este mes (quedará vacío).", class_="malo")
+        elif monto:
+            nota = f"Quedará en {soles(monto if reemplazar else actual + monto)}"
+        else:
+            nota = None
         return ui.div(
             ui.div(f"{input.r_concepto()} en {D.etiqueta_mes(m).lower()}: {soles(actual)} ahora"),
-            ui.strong(f"Quedará en {soles(nuevo)}") if monto else None,
+            ui.strong(nota) if nota else None,
             class_="small text-muted mb-1",
         )
 
@@ -756,8 +764,12 @@ def server(input, output, session):
             ui.notification_show("Modo solo lectura: conecta Google Sheets para guardar.", type="warning")
             return
         if input.r_tipo() == "ingreso":
-            if not input.r_concepto() or monto is None or monto == 0:
+            if not input.r_concepto() or monto is None:
                 ui.notification_show("Completa el concepto y el monto.", type="warning")
+                return
+            if monto == 0 and input.r_modo() == "sumar":
+                ui.notification_show("Para borrar el ingreso del mes, elige «Reemplazar el monto del mes» "
+                                     "con monto 0.", type="warning", duration=6)
                 return
             m = pd.Timestamp(input.r_periodo() + "-01")
             try:
@@ -766,8 +778,9 @@ def server(input, output, session):
             except Exception as e:
                 ui.notification_show(f"No se pudo guardar: {describir_error(e)}", type="error", duration=8)
                 return
+            accion = "borrado" if nuevo == 0 else f"ahora {soles(nuevo)}"
             ui.notification_show(f"Guardado ✓ {input.r_concepto()} de {D.etiqueta_mes(m).lower()}: "
-                                 f"{soles(nuevo)}", type="message", duration=4)
+                                 f"{accion}", type="message", duration=4)
             ui.update_numeric("r_monto", value=None)
             version.set(version() + 1)
             return
