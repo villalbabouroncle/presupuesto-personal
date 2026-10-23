@@ -28,7 +28,25 @@ COLOR_GRUPO = {"Necesarios": AZUL, "Discrecionales": NARANJA, "Situacionales": A
 SECUENCIAL = ["#f4f8fd", "#cde2fb", "#9ec5f4", "#6da7ec", "#3987e5", "#256abf", "#184f95", "#0d366b"]
 TINTA, TINTA_2, LINEA = "#0b0b0b", "#52514e", "#e6e5e0"
 
-VERSION_APP = "2026-10-23b"
+
+def describir_error(e: Exception) -> str:
+    """Incluye el mensaje que devuelve Google. gspread convierte el error 403 en un
+    PermissionError vacío, así que se busca el detalle en el error original."""
+    texto = f"{type(e).__name__}: {e}".strip().rstrip(":")
+    origen = e.__cause__ or e
+    resp = getattr(origen, "response", None)
+    detalle = ""
+    if resp is not None:
+        try:
+            detalle = resp.json().get("error", {}).get("message", "")
+        except Exception:
+            detalle = (getattr(resp, "text", "") or "")[:300]
+    if detalle and detalle not in texto:
+        texto = f"{texto} — {detalle}"
+    return texto
+
+
+VERSION_APP = "2026-10-23d"
 print(f"[presupuesto] versión {VERSION_APP} | SHEET_ID {'sí' if os.environ.get('SHEET_ID') else 'NO'} | "
       f"GOOGLE_CREDENTIALS {'sí' if os.environ.get('GOOGLE_CREDENTIALS') else 'NO'} | "
       f"APP_PASSWORD {'sí' if CLAVE_APP else 'NO'}", flush=True)
@@ -38,7 +56,7 @@ try:
 except Exception as e:  # se muestra en la app
     import traceback
     traceback.print_exc()
-    FUENTE, ERROR_FUENTE = None, f"{type(e).__name__}: {e}"
+    FUENTE, ERROR_FUENTE = None, describir_error(e)
 
 
 # ---------------------------------------------------------------------------
@@ -188,20 +206,32 @@ panel_registrar = ui.nav_panel(
     "Registrar",
     ui.layout_columns(
         ui.card(
-            ui.card_header("Nuevo gasto"),
+            ui.card_header("Nuevo registro"),
             ui.output_ui("aviso_escritura"),
-            ui.input_select("r_grupo", "Tipo de gasto", choices=D.GRUPOS_GASTO, width="100%"),
-            ui.input_select("r_categoria", "Categoría", choices=[], width="100%"),
-            ui.input_text("r_detalle", "Detalle", placeholder="ej. Taxi a la oficina", width="100%"),
+            ui.input_radio_buttons("r_tipo", None, choices={"gasto": "Gasto", "ingreso": "Ingreso"},
+                                   selected="gasto", inline=True),
+            ui.panel_conditional(
+                "input.r_tipo === 'gasto'",
+                ui.input_select("r_grupo", "Tipo de gasto", choices=D.GRUPOS_GASTO, width="100%"),
+                ui.input_select("r_categoria", "Categoría", choices=[], width="100%"),
+                ui.input_text("r_detalle", "Detalle", placeholder="ej. Taxi a la oficina", width="100%"),
+            ),
+            ui.panel_conditional(
+                "input.r_tipo === 'ingreso'",
+                ui.input_select("r_concepto", "Concepto", choices=[], width="100%"),
+                ui.input_radio_buttons("r_modo", "¿Cómo se registra?", choices={
+                    "sumar": "Sumar a lo que ya tiene el mes",
+                    "reemplazar": "Reemplazar el monto del mes",
+                }, selected="sumar"),
+            ),
             ui.input_numeric("r_monto", "Monto (S/)", value=None, min=0, step=0.1, width="100%"),
             ui.input_select("r_periodo", "Periodo", choices=[], width="100%"),
-            ui.input_action_button("r_guardar", "Guardar gasto", class_="btn-primary w-100 mt-2"),
+            ui.output_ui("r_vista_previa"),
+            ui.input_action_button("r_guardar", "Guardar", class_="btn-primary w-100 mt-2"),
         ),
-        ui.card(ui.card_header("Últimos registros del periodo"), ui.output_ui("ultimos")),
+        ui.card(ui.card_header(ui.output_text("titulo_ultimos", inline=True)), ui.output_ui("ultimos")),
         col_widths={"xs": 12, "lg": (5, 7)}, gap="12px",
     ),
-    ui.p("Los ingresos se siguen editando directamente en la hoja (pestaña Presupuesto Mensual).",
-         class_="text-muted small"),
 )
 
 app_ui = ui.page_navbar(
@@ -276,7 +306,7 @@ def server(input, output, session):
         except Exception as e:  # p. ej. hoja no compartida, API desactivada, pestaña renombrada
             import traceback
             traceback.print_exc()
-            error_carga.set(f"{type(e).__name__}: {e}")
+            error_carga.set(describir_error(e))
             req(False)
         error_carga.set("")
         return d
@@ -677,7 +707,7 @@ def server(input, output, session):
     @render.ui
     def aviso_escritura():
         if not datos().puede_escribir:
-            return ui.div("Estás viendo un archivo local de solo lectura. Para registrar gastos, "
+            return ui.div("Estás viendo un archivo local de solo lectura. Para registrar gastos e ingresos, "
                           "conecta la app a tu Google Sheet (ver README).", class_="aviso mb-3")
 
     @reactive.effect
@@ -687,12 +717,59 @@ def server(input, output, session):
         ui.update_select("r_categoria", choices=cats)
 
     @reactive.effect
+    def _():
+        conceptos = list(datos().filas_ingreso)
+        with reactive.isolate():
+            actual = input.r_concepto()
+        ui.update_select("r_concepto", choices=conceptos,
+                         selected=actual if actual in conceptos else (conceptos[0] if conceptos else None))
+
+    def ingreso_actual(concepto: str, m: pd.Timestamp) -> float:
+        p = datos().presupuesto
+        sel = p[(p["grupo"] == "Ingresos") & (p["categoria"] == concepto) & (p["mes"] == m)]
+        return float(sel["monto"].sum())
+
+    @render.ui
+    def r_vista_previa():
+        if input.r_tipo() != "ingreso" or not input.r_concepto() or not input.r_periodo():
+            return None
+        m = pd.Timestamp(input.r_periodo() + "-01")
+        actual = ingreso_actual(input.r_concepto(), m)
+        monto = input.r_monto() or 0
+        nuevo = actual + monto if input.r_modo() == "sumar" else monto
+        return ui.div(
+            ui.div(f"{input.r_concepto()} en {D.etiqueta_mes(m).lower()}: {soles(actual)} ahora"),
+            ui.strong(f"Quedará en {soles(nuevo)}") if monto else None,
+            class_="small text-muted mb-1",
+        )
+
+    @render.text
+    def titulo_ultimos():
+        return "Ingresos del periodo" if input.r_tipo() == "ingreso" else "Últimos gastos del periodo"
+
+    @reactive.effect
     @reactive.event(input.r_guardar)
     def _():
         d = datos()
         monto = input.r_monto()
         if not d.puede_escribir:
             ui.notification_show("Modo solo lectura: conecta Google Sheets para guardar.", type="warning")
+            return
+        if input.r_tipo() == "ingreso":
+            if not input.r_concepto() or monto is None or monto == 0:
+                ui.notification_show("Completa el concepto y el monto.", type="warning")
+                return
+            m = pd.Timestamp(input.r_periodo() + "-01")
+            try:
+                nuevo = FUENTE.registrar_ingreso(d, input.r_concepto(), m, float(monto),
+                                                 sumar=input.r_modo() == "sumar")
+            except Exception as e:
+                ui.notification_show(f"No se pudo guardar: {describir_error(e)}", type="error", duration=8)
+                return
+            ui.notification_show(f"Guardado ✓ {input.r_concepto()} de {D.etiqueta_mes(m).lower()}: "
+                                 f"{soles(nuevo)}", type="message", duration=4)
+            ui.update_numeric("r_monto", value=None)
+            version.set(version() + 1)
             return
         if not input.r_categoria() or monto is None or monto == 0:
             ui.notification_show("Completa la categoría y el monto.", type="warning")
@@ -715,6 +792,13 @@ def server(input, output, session):
         d = datos()
         req(input.r_periodo())
         m = pd.Timestamp(input.r_periodo() + "-01")
+        if input.r_tipo() == "ingreso":
+            filas = [(c, ingreso_actual(c, m)) for c in d.filas_ingreso]
+            total = sum(v for _, v in filas)
+            return ui.div(
+                ui.p(ui.strong(f"Total {D.etiqueta_mes(m).lower()}: {soles(total)}"), class_="mb-2"),
+                *[ui.div(ui.strong(c), ui.div(soles(v), class_="monto"), class_="alerta") for c, v in filas],
+            )
         r = d.registro[d.registro["mes"] == m].sort_values("fila", ascending=False)
         if r.empty:
             return ui.p("Todavía no hay gastos registrados en este periodo.", class_="text-muted")
