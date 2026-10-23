@@ -1,0 +1,5 @@
+# Nunca subas tus datos ni tus credenciales a GitHub
+credenciales.json
+*.xlsx
+.env
+__pycache__/
