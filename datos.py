@@ -124,6 +124,8 @@ class Datos:
     tarjetas: list[tuple[str, float]] = field(default_factory=list)
     categorias: dict[str, list[str]] = field(default_factory=dict)  # grupo -> categorías
     periodos: list[pd.Timestamp] = field(default_factory=list)      # columnas de meses
+    filas_ingreso: dict[str, int] = field(default_factory=dict)     # concepto -> fila (1-based)
+    columnas_mes: dict[pd.Timestamp, int] = field(default_factory=dict)  # mes -> columna (1-based)
     fuente: str = ""
     puede_escribir: bool = False
 
@@ -168,7 +170,8 @@ def parsear_presupuesto(filas: list[list]):
     ahorros, tarjetas = [], []
     grupo_actual, en_tarjetas = None, False
 
-    for fila in filas[fila_meses + 1:]:
+    filas_ingreso = {}
+    for i_fila, fila in enumerate(filas[fila_meses + 1:], start=fila_meses + 2):
         etiqueta = _texto(_celda(fila, 0))
         if not etiqueta:
             continue
@@ -192,6 +195,8 @@ def parsear_presupuesto(filas: list[list]):
 
         if grupo_actual:
             categorias[grupo_actual].append(etiqueta)
+            if grupo_actual == "Ingresos":
+                filas_ingreso[etiqueta] = i_fila
             for j, mes in columnas_mes.items():
                 monto = a_numero(_celda(fila, j))
                 if monto:
@@ -207,7 +212,9 @@ def parsear_presupuesto(filas: list[list]):
 
     df = pd.DataFrame(registros, columns=["mes", "grupo", "categoria", "monto"])
     periodos = sorted(set(columnas_mes.values()))
-    return df, periodos, ahorros, tarjetas, categorias
+    posiciones = {"filas_ingreso": filas_ingreso,
+                  "columnas_mes": {m: j + 1 for j, m in columnas_mes.items()}}
+    return df, periodos, ahorros, tarjetas, categorias, posiciones
 
 
 def parsear_registro(filas: list[list]) -> pd.DataFrame:
@@ -241,7 +248,7 @@ def parsear_registro(filas: list[list]) -> pd.DataFrame:
 
 
 def construir(filas_presupuesto, filas_registro, fuente, puede_escribir) -> Datos:
-    df, periodos, ahorros, tarjetas, categorias = parsear_presupuesto(filas_presupuesto)
+    df, periodos, ahorros, tarjetas, categorias, pos = parsear_presupuesto(filas_presupuesto)
     return Datos(
         presupuesto=df,
         registro=parsear_registro(filas_registro),
@@ -249,6 +256,8 @@ def construir(filas_presupuesto, filas_registro, fuente, puede_escribir) -> Dato
         tarjetas=tarjetas,
         categorias=categorias,
         periodos=periodos,
+        filas_ingreso=pos["filas_ingreso"],
+        columnas_mes=pos["columnas_mes"],
         fuente=fuente,
         puede_escribir=puede_escribir,
     )
@@ -273,6 +282,9 @@ class FuenteExcel:
     def cargar(self) -> Datos:
         return construir(self._filas(HOJA_PRESUPUESTO), self._filas(HOJA_REGISTRO),
                          f"Archivo local: {self.ruta.name}", False)
+
+    def registrar_ingreso(self, *args, **kwargs):
+        raise RuntimeError("El archivo .xlsx local es solo de lectura.")
 
     def agregar_gasto(self, *args, **kwargs):
         raise RuntimeError("El archivo .xlsx local es solo de lectura. "
@@ -333,6 +345,63 @@ class FuenteGoogle:
                     values=[[categoria, detalle, texto_periodo(mes), float(monto)]],
                     value_input_option="RAW")
         return destino
+
+    def registrar_ingreso(self, datos: "Datos", concepto: str, mes: pd.Timestamp,
+                          monto: float, sumar: bool) -> float:
+        """Escribe un ingreso en 'Presupuesto Mensual' (fila del concepto, columna del mes).
+
+        sumar=True  -> agrega '+monto' a lo que ya tiene la celda, conservando tu estilo
+                       de fórmulas (=1041,65+856,8 pasa a =1041,65+856,8+500).
+        sumar=False -> reemplaza la celda por el monto.
+        Devuelve el nuevo valor de la celda."""
+        from gspread.utils import ValueRenderOption, rowcol_to_a1
+        fila = datos.filas_ingreso.get(concepto)
+        col = datos.columnas_mes.get(mes)
+        if not fila or not col:
+            raise ValueError(f"No encontré la celda de '{concepto}' para {texto_periodo(mes)}.")
+        hoja = self._libro.worksheet(HOJA_PRESUPUESTO)
+        celda = rowcol_to_a1(fila, col)
+
+        actual_formula = hoja.acell(celda, value_render_option=ValueRenderOption.formula).value
+        actual_valor = a_numero(hoja.acell(celda, value_render_option=ValueRenderOption.unformatted).value) or 0.0
+        esperado = (actual_valor + monto) if sumar else monto
+
+        if not sumar or actual_formula in (None, ""):
+            hoja.update_acell(celda, round(esperado, 2))
+            return esperado
+
+        # Sumar conservando la fórmula: detectar coma o punto decimal en tu hoja
+        muestras = hoja.row_values(fila, value_render_option=ValueRenderOption.formula)
+        decimal = _separador_decimal(muestras + [actual_formula], []) or ","
+        if str(actual_formula).startswith("="):
+            base = str(actual_formula)
+        else:  # la celda tenía un número escrito a mano
+            base = "=" + _numero_en_formula(actual_valor, decimal)
+        nueva = f"{base}+{_numero_en_formula(monto, decimal)}"
+        hoja.update(range_name=celda, values=[[nueva]], value_input_option="USER_ENTERED")
+
+        # Verificación: si la hoja no la interpretó bien, se escribe el número directo
+        nuevo = a_numero(hoja.acell(celda, value_render_option=ValueRenderOption.unformatted).value)
+        if nuevo is None or abs(nuevo - esperado) > 0.005:
+            hoja.update_acell(celda, round(esperado, 2))
+        return esperado
+
+
+def _numero_en_formula(monto: float, decimal: str) -> str:
+    """Escribe el monto como lo teclearías en tu hoja (p. ej. 1041,65)."""
+    texto = f"{monto:.2f}".rstrip("0").rstrip(".")
+    return texto.replace(".", decimal)
+
+
+def _separador_decimal(formulas: list[str], valores: list) -> str | None:
+    """Deduce si tu hoja usa coma o punto decimal mirando fórmulas existentes."""
+    for f in formulas:
+        if isinstance(f, str) and f.startswith("="):
+            if re.search(r"\d,\d", f):
+                return ","
+            if re.search(r"\d\.\d", f):
+                return "."
+    return None
 
 
 def crear_fuente():
