@@ -287,7 +287,10 @@ class FuenteGoogle:
     def __init__(self, sheet_id: str, credenciales: dict):
         import gspread
         self._gc = gspread.service_account_from_dict(credenciales)
+        self._gc.set_timeout(30)  # si Google no responde, falla con error en vez de colgarse
         self._libro = self._gc.open_by_key(sheet_id)
+        print(f"[presupuesto] Conectado a la hoja '{self._libro.title}' "
+              f"como {credenciales.get('client_email')}", flush=True)
 
     def _filas(self, hoja: str) -> list[list]:
         from gspread.utils import ValueRenderOption
@@ -295,8 +298,12 @@ class FuenteGoogle:
             value_render_option=ValueRenderOption.unformatted)
 
     def cargar(self) -> Datos:
-        return construir(self._filas(HOJA_PRESUPUESTO), self._filas(HOJA_REGISTRO),
-                         f"Google Sheets: {self._libro.title}", True)
+        print("[presupuesto] Leyendo pestañas de Google Sheets...", flush=True)
+        d = construir(self._filas(HOJA_PRESUPUESTO), self._filas(HOJA_REGISTRO),
+                      f"Google Sheets: {self._libro.title}", True)
+        print(f"[presupuesto] OK: {len(d.registro)} movimientos, "
+              f"{len(d.meses_con_gastos)} meses con gastos", flush=True)
+        return d
 
     def agregar_gasto(self, grupo: str, categoria: str, detalle: str,
                       mes: pd.Timestamp, monto: float) -> int:
