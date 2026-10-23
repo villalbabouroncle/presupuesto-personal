@@ -366,6 +366,10 @@ class FuenteGoogle:
         actual_valor = a_numero(hoja.acell(celda, value_render_option=ValueRenderOption.unformatted).value) or 0.0
         esperado = (actual_valor + monto) if sumar else monto
 
+        if not sumar and monto == 0:  # borrar el ingreso de ese mes
+            hoja.batch_clear([celda])
+            return 0.0
+
         if not sumar or actual_formula in (None, ""):
             hoja.update_acell(celda, round(esperado, 2))
             return esperado
