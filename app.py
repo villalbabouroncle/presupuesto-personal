@@ -218,6 +218,7 @@ app_ui = ui.page_navbar(
             ui.output_text("fuente_txt", inline=False),
             class_="barra-mes container-fluid",
         ),
+        ui.output_ui("acceso"),
         ui.output_ui("error_fuente"),
     ),
 )
@@ -229,32 +230,34 @@ app_ui = ui.page_navbar(
 def server(input, output, session):
     autenticado = reactive.value(not CLAVE_APP)
     version = reactive.value(0)
+    error_carga = reactive.value("")
 
     # ---------- acceso ----------
-    if CLAVE_APP:
-        ui.modal_show(ui.modal(
-            ui.input_password("clave", "Contraseña", width="100%"),
-            ui.output_ui("clave_error"),
-            title="Mi presupuesto",
-            footer=ui.input_action_button("entrar", "Entrar", class_="btn-primary"),
-            easy_close=False,
-        ))
+    intento_fallido = reactive.value(False)
 
-        intento_fallido = reactive.value(False)
+    @render.ui
+    def acceso():
+        if not CLAVE_APP or autenticado():
+            return None
+        return ui.div(
+            ui.div(
+                ui.h5("Ingresa tu contraseña", class_="mb-3"),
+                ui.input_password("clave", None, placeholder="Contraseña", width="100%"),
+                ui.input_action_button("entrar", "Entrar", class_="btn-primary w-100"),
+                ui.p("Contraseña incorrecta.", class_="malo small mt-2 mb-0") if intento_fallido() else None,
+                class_="kpi", style="max-width:380px; margin:24px auto;",
+            ),
+            class_="container-fluid",
+        )
 
-        @reactive.effect
-        @reactive.event(input.entrar)
-        def _():
-            if input.clave() == CLAVE_APP:
-                autenticado.set(True)
-                ui.modal_remove()
-            else:
-                intento_fallido.set(True)
-
-        @render.ui
-        def clave_error():
-            if intento_fallido():
-                return ui.p("Contraseña incorrecta.", class_="malo small mb-0")
+    @reactive.effect
+    @reactive.event(input.entrar)
+    def _():
+        if (input.clave() or "").strip() == CLAVE_APP.strip():
+            autenticado.set(True)
+            intento_fallido.set(False)
+        else:
+            intento_fallido.set(True)
 
     # ---------- datos ----------
     @reactive.calc
@@ -262,7 +265,15 @@ def server(input, output, session):
         req(autenticado())
         version()
         req(FUENTE is not None)
-        return FUENTE.cargar()
+        try:
+            d = FUENTE.cargar()
+        except Exception as e:  # p. ej. hoja no compartida, API desactivada, pestaña renombrada
+            import traceback
+            traceback.print_exc()
+            error_carga.set(f"{type(e).__name__}: {e}")
+            req(False)
+        error_carga.set("")
+        return d
 
     @reactive.effect
     @reactive.event(input.recargar)
@@ -272,8 +283,9 @@ def server(input, output, session):
 
     @render.ui
     def error_fuente():
-        if ERROR_FUENTE:
-            return ui.div(ui.strong("No se pudieron cargar los datos. "), ERROR_FUENTE,
+        mensaje = ERROR_FUENTE or error_carga()
+        if mensaje:
+            return ui.div(ui.strong("No se pudieron cargar los datos. "), mensaje,
                           class_="error container-fluid")
 
     @render.text
