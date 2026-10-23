@@ -28,11 +28,17 @@ COLOR_GRUPO = {"Necesarios": AZUL, "Discrecionales": NARANJA, "Situacionales": A
 SECUENCIAL = ["#f4f8fd", "#cde2fb", "#9ec5f4", "#6da7ec", "#3987e5", "#256abf", "#184f95", "#0d366b"]
 TINTA, TINTA_2, LINEA = "#0b0b0b", "#52514e", "#e6e5e0"
 
+VERSION_APP = "2026-10-23b"
+print(f"[presupuesto] versión {VERSION_APP} | SHEET_ID {'sí' if os.environ.get('SHEET_ID') else 'NO'} | "
+      f"GOOGLE_CREDENTIALS {'sí' if os.environ.get('GOOGLE_CREDENTIALS') else 'NO'} | "
+      f"APP_PASSWORD {'sí' if CLAVE_APP else 'NO'}", flush=True)
 try:
     FUENTE = D.crear_fuente()
     ERROR_FUENTE = ""
 except Exception as e:  # se muestra en la app
-    FUENTE, ERROR_FUENTE = None, str(e)
+    import traceback
+    traceback.print_exc()
+    FUENTE, ERROR_FUENTE = None, f"{type(e).__name__}: {e}"
 
 
 # ---------------------------------------------------------------------------
@@ -215,7 +221,7 @@ app_ui = ui.page_navbar(
         ui.div(
             ui.input_select("mes", "Mes", choices=[]),
             ui.input_action_button("recargar", "↻ Actualizar datos", class_="btn-outline-secondary"),
-            ui.output_text("fuente_txt", inline=False),
+            ui.div(ui.output_text("fuente_txt", inline=True), f" · v{VERSION_APP}", class_="fuente"),
             class_="barra-mes container-fluid",
         ),
         ui.output_ui("acceso"),
